@@ -105,7 +105,7 @@ def main():
         cuCvarFlags = codeUnits.next()
         if cuCvarFlags.getMnemonicString() != "MOV":
             raise Exception("Unexpected instruction at " + str(cuCvarFlags.getAddress()) + ". Expected MOV")
-        entry["flags"] = str(codeUnit.getScalar(1))
+        entry["flags"] = str(cuCvarFlags.getScalar(1))
         
         cu = codeUnits.next()
         if cu.getMnemonicString() != "MOVSS" or cu.getRegister(1).getName() != "XMM1":
@@ -117,10 +117,10 @@ def main():
             entry["min"] = 0.0;
         elif cuCvarMinValue.getMnemonicString() == "MOVSS" and cuCvarMinValue.getRegister(0).getName() == "XMM1":
             cu = listing.getCodeUnitAt(cuCvarMinValue.getAddress(1))
-            if cu.getDataType().getName != "float":
+            if cu.getDataType().getName() != "float":
                 print("Cvar (" + str(codeUnit.getAddress()) + ") min: Setting datatype at " + str(cu.getAddress()) + " to Float")
                 clearListing(cu.getAddress())
-                createData(cu.getAddress(),getDataTypes("float")[0])
+                createData(cu.getAddress(),getDataTypes("Float")[0])
                 cu = listing.getCodeUnitAt(cu.getAddress())
             entry["min"] = cu.getValue()
         else:
@@ -138,7 +138,7 @@ def main():
             entry["max"] = 0.0;
         elif cuCvarMaxValue.getMnemonicString() == "MOVSS" and cuCvarMaxValue.getRegister(0).getName() == "XMM0":
             cu = listing.getCodeUnitAt(cuCvarMaxValue.getAddress(1))
-            if cu.getDataType().getName != "float":
+            if cu.getDataType().getName() != "float":
                 print("Cvar (" + str(codeUnit.getAddress()) + ") max: Setting datatype at " + str(cu.getAddress()) + " to Float")
                 clearListing(cu.getAddress())
                 createData(cu.getAddress(),getDataTypes("float")[0])
