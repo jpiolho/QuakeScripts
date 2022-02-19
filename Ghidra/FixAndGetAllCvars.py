@@ -10,6 +10,7 @@
 
 
 import json
+import ghidra.app.decompiler as decomp
 
 class CvarEntry(dict):
     def __init__(self):
@@ -30,14 +31,37 @@ def FindAndCreateFunctionForAddress(addr):
         codeUnit = codeUnits.next()
     createFunction(codeUnit.getAddress(),None)
 
+def GetAndDefineTerminatedCStringAt(addr):
+    cu = currentProgram.getListing().getCodeUnitAt(addr)
+    if cu.getDataType().getName() != "TerminatedCString":
+        print("Setting " + str(addr) + " data to TerminatedCString")
+        clearListing(cu.getAddress())
+        createData(cu.getAddress(),getDataTypes("TerminatedCString")[0])
+        cu = currentProgram.getListing().getCodeUnitAt(addr)
+    return cu.getValue()
+
+def GetAndDefineFloatAt(addr):
+    cu = currentProgram.getListing().getCodeUnitAt(addr)
+    if cu.getDataType().getName() != "float":
+        print("Setting " + str(addr) + " data to float")
+        clearListing(cu.getAddress())
+        createData(cu.getAddress(),getDataTypes("float")[0])
+        cu = currentProgram.getListing().getCodeUnitAt(addr)
+    return cu.getValue()
+
+def FixPCodeAddress(addr):
+    return toAddr(addr.toString(False))
+
 def main():
-    global cu
-    global cuCvarFlags
+    global pCodeOp
     
     cvars = []
     
+    addr_registerCvar = toAddr("RegisterCvar")
+    
     listing = currentProgram.getListing()
-    references = getReferencesTo(toAddr("RegisterCvar"))
+    references = getReferencesTo(addr_registerCvar)
+    iface = decomp.DecompInterface()
     
     for xref in references:
         codeUnits = listing.getCodeUnits(xref.getFromAddress(), False)
@@ -55,107 +79,85 @@ def main():
             FindAndCreateFunctionForAddress(codeUnit.getAddress())
             print("Created function")
         
-        entry = CvarEntry()
+        fn = getFunctionContaining(codeUnit.getAddress())
         
-        # Get cvar variable
-        cuCvarVariable = codeUnits.next() # Cvar variable
-        if cuCvarVariable.getMnemonicString() != "LEA" or cuCvarVariable.getRegister(0).getName() != "RCX":
-            raise Exception("Unexpected instruction at " + str(cuCvarVariable.getAddress()) + ". Expected LEA RCX")
+        if fn is None: raise Exception("Function expected at " + str(codeUnit.getAddress()))
         
-        # Get cvar name
-        cuCvarName = codeUnits.next()
-        if cuCvarName.getMnemonicString() != "LEA" or cuCvarName.getRegister(0).getName() != "RDX":
-            raise Exception("Unexpected instruction at " + str(cuCvarName.getAddress()) + ". Expected LEA RCX")
-        cu = listing.getCodeUnitAt(cuCvarName.getAddress(1))
-        if cu.getDataType().getName() != "string" and cu.getDataType().getName() != "TerminatedCString":
-            # Set the datatype to string
-            print("Cvar (" + str(codeUnit.getAddress()) + ") name: Setting datatype at " + str(cu.getAddress()) + " to TerminatedCString")
-            createData(cu.getAddress(),getDataTypes("TerminatedCString")[0])
-            cu = listing.getCodeUnitAt(cu.getAddress())
-        entry["name"] = cu.getValue()
-        print(" Name: " + entry["name"])
+        iface.openProgram(fn.getProgram())
+        decompilation = iface.decompileFunction(fn,0,monitor)
         
-        # Get cvar default value
-        cuCvarDefaultValue = codeUnits.next()
-        if cuCvarDefaultValue.getMnemonicString() != "LEA" or cuCvarDefaultValue.getRegister(0).getName() != "R8":
-            raise Exception("Unexpected instruction at " + str(cuCvarDefaultValue.getAddress()) + ". Expected LEA R8")
-        cu = listing.getCodeUnitAt(cuCvarDefaultValue.getAddress(1))
-        if cu.getDataType().getName() != "string" and cu.getDataType().getName() != "TerminatedCString":
-            # Set the datatype to string
-            print("Cvar (" + str(codeUnit.getAddress()) + ") default value: Setting datatype at " + str(cu.getAddress()) + " to TerminatedCString")
-            createData(cu.getAddress(),getDataTypes("TerminatedCString")[0])
-            cu = listing.getCodeUnitAt(cu.getAddress())
-        entry["defaultValue"] = cu.getValue()
-        print(" Default value: " + entry["defaultValue"])
+        if not decompilation.decompileCompleted(): raise Exception("Decompilation failed for function at " + str(fn.getAddress()) + ". Error: " + decompilation.getErrorMessage())
         
-        # Get cvar description
-        cuCvarDescription = codeUnits.next()
-        if cuCvarDescription.getMnemonicString() != "LEA" or cuCvarDescription.getRegister(0).getName() != "R9":
-            raise Exception("Unexpected instruction at " + str(cuCvarDescription.getAddress()) + ". Expected LEA R9")
-        cu = listing.getCodeUnitAt(cuCvarDescription.getAddress(1))
-        if cu.getDataType().getName() != "string" and cu.getDataType().getName() != "TerminatedCString":
-            # Set the datatype to string
-            print("Cvar (" + str(codeUnit.getAddress()) + ") default value: Setting datatype at " + str(cu.getAddress()) + " to TerminatedCString")
-            createData(cu.getAddress(),getDataTypes("TerminatedCString")[0])
-            cu = listing.getCodeUnitAt(cu.getAddress())
-        entry["description"] = cu.getValue()
-        print(" Description: " + entry["description"])
+        hf = decompilation.getHighFunction()
+        pCodeOps = hf.getPcodeOps()
         
-        # Get cvar flags
-        cuCvarFlags = codeUnits.next()
-        if cuCvarFlags.getMnemonicString() != "MOV":
-            raise Exception("Unexpected instruction at " + str(cuCvarFlags.getAddress()) + ". Expected MOV")
-        entry["flags"] = str(cuCvarFlags.getScalar(1))
-        
-        cu = codeUnits.next()
-        if cu.getMnemonicString() != "MOVSS" or cu.getRegister(1).getName() != "XMM1":
-            raise Exception("Unexpected instruction at " + str(cu.getAddress()) + ". Expected MOVSS XMM1")
+        for pCodeOp in pCodeOps:
+            # Search for the right function call
+            if pCodeOp.getMnemonic() != "CALL": continue
+            pcCall = pCodeOp.getInput(0)
+            if not pcCall.isAddress() or pcCall.getAddress() != addr_registerCvar: continue
             
-        # Get cvar minimum value
-        cuCvarMinValue = codeUnits.next()
-        if cuCvarMinValue.getMnemonicString() == "XORPS" and cuCvarMinValue.getRegister(0).getName() == "XMM1":
-            entry["min"] = 0.0;
-        elif cuCvarMinValue.getMnemonicString() == "MOVSS" and cuCvarMinValue.getRegister(0).getName() == "XMM1":
-            cu = listing.getCodeUnitAt(cuCvarMinValue.getAddress(1))
-            if cu.getDataType().getName() != "float":
-                print("Cvar (" + str(codeUnit.getAddress()) + ") min: Setting datatype at " + str(cu.getAddress()) + " to Float")
-                clearListing(cu.getAddress())
-                createData(cu.getAddress(),getDataTypes("Float")[0])
-                cu = listing.getCodeUnitAt(cu.getAddress())
-            entry["min"] = cu.getValue()
-        else:
-            raise Exception("Unexpected instruction at " + str(cu.getAddress()) + ". Expected MOVSS XMM1 or XORPS XMM1")
-        print(" Min: " + str(entry["min"]))
-        
-        
-        cu = codeUnits.next()
-        if cu.getMnemonicString() != "MOVSS" or cu.getRegister(1).getName() != "XMM0":
-            raise Exception("Unexpected instruction at " + str(cu.getAddress()) + ". Expected MOVSS XMM0")
+            entry = CvarEntry()
             
-        # Get cvar minimum value
-        cuCvarMaxValue = codeUnits.next()
-        if cuCvarMaxValue.getMnemonicString() == "XORPS" and cuCvarMaxValue.getRegister(0).getName() == "XMM0":
-            entry["max"] = 0.0;
-        elif cuCvarMaxValue.getMnemonicString() == "MOVSS" and cuCvarMaxValue.getRegister(0).getName() == "XMM0":
-            cu = listing.getCodeUnitAt(cuCvarMaxValue.getAddress(1))
-            if cu.getDataType().getName() != "float":
-                print("Cvar (" + str(codeUnit.getAddress()) + ") max: Setting datatype at " + str(cu.getAddress()) + " to Float")
-                clearListing(cu.getAddress())
-                createData(cu.getAddress(),getDataTypes("float")[0])
-                cu = listing.getCodeUnitAt(cu.getAddress())
-            entry["max"] = cu.getValue()
-        else:
-            raise Exception("Unexpected instruction at " + str(cu.getAddress()) + ". Expected MOVSS XMM0 or XORPS XMM0")
-        print(" Max: " + str(entry["max"]))
-        
-        
-        # Check if cvar is already in the list
-        existingEntry = [x for x in cvars if x["name"] == entry["name"]]
-        
-        if bool(existingEntry):
-            cvars.remove(existingEntry[0])
-        
-        cvars.append(entry)
+            pcVariable = pCodeOp.getInput(1)
+            if not pcVariable.isUnique(): raise Exception("Expected 'unique' for input 1")
+            
+            # Cvar name
+            pcName = pCodeOp.getInput(2)
+            if not pcName.isUnique(): raise Exception("Expected 'unique' for input 2")
+            pcd = pcName.getDef()
+            if not pcd.getInput(0).isConstant(): raise Exception("Expected 'constant' for name input")
+            entry["name"] = GetAndDefineTerminatedCStringAt(FixPCodeAddress(pcd.getInput(0).getAddress()))
+            print(" Name: " + entry["name"])
+            
+            # Cvar default value
+            pcDefaultValue = pCodeOp.getInput(3)
+            if not pcDefaultValue.isUnique(): raise Exception("Expected 'unique' for default value input")
+            pcd = pcDefaultValue.getDef()
+            if not pcd.getInput(0).isConstant(): raise Exception("Expected 'constant' for default value")
+            entry["defaultValue"] = GetAndDefineTerminatedCStringAt(FixPCodeAddress(pcd.getInput(0).getAddress()))
+            print(" Default value: " + entry["defaultValue"])
+            
+            # Cvar description
+            pcDescription = pCodeOp.getInput(4)
+            if not pcDescription.isUnique(): raise Exception("Expected 'unique' for description input")
+            pcd = pcDescription.getDef()
+            if not pcd.getInput(0).isConstant(): raise Exception("Expected 'constant' for description")
+            entry["description"] = GetAndDefineTerminatedCStringAt(FixPCodeAddress(pcd.getInput(0).getAddress()))
+            print(" Description: " + entry["description"])
+            
+            # Cvar flags
+            pcFlags = pCodeOp.getInput(5)
+            if not pcFlags.isConstant(): raise Exception("Expected 'constant' for flag input")
+            entry["flags"] = str(pcFlags.getHigh().getScalar())
+            print(" Flags: " + entry["flags"])
+            
+            # Cvar min
+            pcMin = pCodeOp.getInput(6)
+            if pcMin.isConstant():
+                entry["min"] = pcMin.getHigh().getScalar().getValue()
+            elif pcMin.isAddress():
+                entry["min"] = GetAndDefineFloatAt(FixPCodeAddress(pcMin.getAddress()))
+            else: raise Exception("Unsupported type for min input")
+            print(" Min: " + str(entry["min"]))
+            
+            # Cvar max
+            pcMax = pCodeOp.getInput(7)
+            if pcMax.isConstant():
+                entry["max"] = pcMax.getHigh().getScalar().getValue()
+            elif pcMax.isAddress():
+                entry["max"] = GetAndDefineFloatAt(FixPCodeAddress(pcMax.getAddress()))
+            else: raise Exception("Unsupported type for max input")
+            print(" Max: " + str(entry["max"]))
+            
+            # Check if cvar is already in the list
+            existingEntry = [x for x in cvars if x["name"] == entry["name"]]
+            
+            if bool(existingEntry):
+                cvars.remove(existingEntry[0])
+            
+            cvars.append(entry)
+            break
     
     cvars.sort(key=SortByName)
     
